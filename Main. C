@@ -1,0 +1,501 @@
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_main.h>
+#include <SDL2/SDL_ttf.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define BOARD_WIDTH 10
+#define BOARD_HEIGHT 20
+#define BLOCK_SIZE 32
+#define PANEL_WIDTH 200
+#define WINDOW_WIDTH (BOARD_WIDTH * BLOCK_SIZE + PANEL_WIDTH)
+#define WINDOW_HEIGHT (BOARD_HEIGHT * BLOCK_SIZE)
+
+// Modern Dark Theme Palette (RGB)
+typedef struct {
+  Uint8 r, g, b;
+} Color;
+
+const Color COLOR_BG = {15, 23, 42};       // Slate 900
+const Color COLOR_PANEL = {30, 41, 59};    // Slate 800
+const Color COLOR_GRID = {51, 65, 85};     // Slate 700
+const Color COLOR_TEXT = {241, 245, 249};  // Slate 100
+const Color COLOR_MUTED = {148, 163, 184}; // Slate 400
+
+// Tetromino Colors (Cyan, Yellow, Purple, Green, Red, Blue, Orange)
+const Color PIECE_COLORS[7] = {
+    {6, 182, 212},   // I - Cyan
+    {234, 179, 8},   // O - Yellow
+    {168, 85, 247},  // T - Purple
+    {34, 197, 94},   // S - Green
+    {239, 68, 68},   // Z - Red
+    {59, 130, 246},  // J - Blue
+    {249, 115, 22},  // L - Orange
+};
+
+// Tetromino Shapes (4x4 grids)
+int SHAPES[7][4][4] = {
+    {{0, 0, 0, 0}, {1, 1, 1, 1}, {0, 0, 0, 0}, {0, 0, 0, 0}}, // I
+    {{0, 0, 0, 0}, {0, 1, 1, 0}, {0, 1, 1, 0}, {0, 0, 0, 0}}, // O
+    {{0, 0, 0, 0}, {0, 1, 0, 0}, {1, 1, 1, 0}, {0, 0, 0, 0}}, // T
+    {{0, 0, 0, 0}, {0, 1, 1, 0}, {1, 1, 0, 0}, {0, 0, 0, 0}}, // S
+    {{0, 0, 0, 0}, {1, 1, 0, 0}, {0, 1, 1, 0}, {0, 0, 0, 0}}, // Z
+    {{0, 0, 0, 0}, {1, 0, 0, 0}, {1, 1, 1, 0}, {0, 0, 0, 0}}, // J
+    {{0, 0, 0, 0}, {0, 0, 1, 0}, {1, 1, 1, 0}, {0, 0, 0, 0}}  // L
+};
+
+typedef struct {
+  int x, y;
+  int type;
+  int rotation;
+} Piece;
+
+typedef struct {
+  int grid[BOARD_HEIGHT][BOARD_WIDTH];
+  Piece current;
+  Piece next;
+  int score;
+  int lines;
+  int level;
+  bool game_over;
+} Game;
+
+// Function Prototypes
+void init_game(Game *game);
+void spawn_piece(Game *game);
+bool check_collision(Game *game, Piece *p, int dx, int dy, int rot);
+void merge_piece(Game *game);
+void clear_lines(Game *game);
+void rotate_piece(Game *game);
+void render_game(TTF_Font *font, SDL_Renderer *renderer, Game *game);
+
+int main(int argc, char *argv[]) {
+  if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+    printf("SDL Init Error: %s\n", SDL_GetError());
+    return 1;
+  }
+
+  SDL_Window *window = SDL_CreateWindow(
+      "Modern C Tetris", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+      WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_SHOWN);
+  if (!window) {
+    printf("Window Creation Error: %s\n", SDL_GetError());
+    SDL_Quit();
+    return 1;
+  }
+
+  SDL_Renderer *renderer =
+      SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+  if (!renderer) {
+    printf("Renderer Creation Error: %s\n", SDL_GetError());
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 1;
+  }
+
+  // Enable Alpha Blending for transparent ghost pieces and overlays
+  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+  if (TTF_Init() != 0) {
+    printf("SDL_ttf Init Error: %s\n", TTF_GetError());
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 1;
+  }
+
+  TTF_Font *font = TTF_OpenFont("C:\\Windows\\Fonts\\arial.ttf", 22);
+  if (!font) {
+    printf("Font Creation Error: %s\n", TTF_GetError());
+    TTF_Quit();
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 1;
+  }
+
+  srand(time(NULL));
+  Game game;
+  init_game(&game);
+
+  Uint32 last_fall_time = SDL_GetTicks();
+  bool running = true;
+  SDL_Event e;
+
+  while (running) {
+    // Handle Input
+    while (SDL_PollEvent(&e) != 0) {
+      if (e.type == SDL_QUIT) {
+        running = false;
+      } else if (e.type == SDL_KEYDOWN && !game.game_over) {
+        switch (e.key.keysym.sym) {
+        case SDLK_LEFT:
+          if (!check_collision(&game, &game.current, -1, 0,
+                               game.current.rotation))
+            game.current.x--;
+          break;
+        case SDLK_RIGHT:
+          if (!check_collision(&game, &game.current, 1, 0,
+                               game.current.rotation))
+            game.current.x++;
+          break;
+        case SDLK_DOWN:
+          if (!check_collision(&game, &game.current, 0, 1,
+                               game.current.rotation)) {
+            game.current.y++;
+            game.score += 1; // Soft drop bonus
+          }
+          break;
+        case SDLK_UP:
+        case SDLK_x:
+          rotate_piece(&game);
+          break;
+        case SDLK_SPACE:
+          while (!check_collision(&game, &game.current, 0, 1,
+                                  game.current.rotation)) {
+            game.current.y++;
+            game.score += 2; // Hard drop bonus
+          }
+          merge_piece(&game);
+          clear_lines(&game);
+          spawn_piece(&game);
+          break;
+        case SDLK_r:
+          if (game.game_over)
+            init_game(&game);
+          break;
+        }
+      }
+    }
+
+    // Automatic Fall / Gravity
+    Uint32 current_time = SDL_GetTicks();
+    int fall_speed =
+        SDL_max(100, 500 - (game.level * 40)); // Speeds up with levels
+    if (!game.game_over && (current_time - last_fall_time > (Uint32)fall_speed)) {
+      if (!check_collision(&game, &game.current, 0, 1, game.current.rotation)) {
+        game.current.y++;
+      } else {
+        merge_piece(&game);
+        clear_lines(&game);
+        spawn_piece(&game);
+      }
+      last_fall_time = current_time;
+    }
+
+    // Render Frame
+    render_game(font, renderer, &game);
+    SDL_Delay(16); // ~60 FPS cap
+  }
+
+  SDL_DestroyRenderer(renderer);
+  SDL_DestroyWindow(window);
+  SDL_Quit();
+  TTF_Quit();
+  return 0;
+}
+
+void init_game(Game *game) {
+  for (int r = 0; r < BOARD_HEIGHT; r++) {
+    for (int c = 0; c < BOARD_WIDTH; c++) {
+      game->grid[r][c] = -1;
+    }
+  }
+  game->score = 0;
+  game->lines = 0;
+  game->level = 1;
+  game->game_over = false;
+  game->next.type = rand() % 7;
+  spawn_piece(game);
+}
+
+void spawn_piece(Game *game) {
+  game->current.type = game->next.type;
+  game->next.type = rand() % 7;
+  game->current.x = BOARD_WIDTH / 2 - 2;
+  game->current.y = 0;
+  game->current.rotation = 0;
+
+  if (check_collision(game, &game->current, 0, 0, game->current.rotation)) {
+    game->game_over = true;
+  }
+}
+
+bool check_collision(Game *game, Piece *p, int dx, int dy, int rot) {
+  int shape_idx = p->type;
+  for (int r = 0; r < 4; r++) {
+    for (int c = 0; c < 4; c++) {
+      int tr = r, tc = c;
+      for (int i = 0; i < (rot % 4); i++) {
+        int temp = tr;
+        tr = tc;
+        tc = 3 - temp;
+      }
+
+      if (SHAPES[shape_idx][tr][tc]) {
+        int new_x = p->x + c + dx;
+        int new_y = p->y + r + dy;
+
+        if (new_x < 0 || new_x >= BOARD_WIDTH || new_y >= BOARD_HEIGHT)
+          return true;
+        if (new_y >= 0 && game->grid[new_y][new_x] != -1)
+          return true;
+      }
+    }
+  }
+  return false;
+}
+
+void rotate_piece(Game *game) {
+  int next_rot = (game->current.rotation + 1) % 4;
+  if (!check_collision(game, &game->current, 0, 0, next_rot)) {
+    game->current.rotation = next_rot;
+  } else if (!check_collision(game, &game->current, -1, 0, next_rot)) {
+    game->current.x--;
+    game->current.rotation = next_rot;
+  } else if (!check_collision(game, &game->current, 1, 0, next_rot)) {
+    game->current.x++;
+    game->current.rotation = next_rot;
+  }
+}
+
+void merge_piece(Game *game) {
+  int shape_idx = game->current.type;
+  for (int r = 0; r < 4; r++) {
+    for (int c = 0; c < 4; c++) {
+      int tr = r, tc = c;
+      for (int i = 0; i < (game->current.rotation % 4); i++) {
+        int temp = tr;
+        tr = tc;
+        tc = 3 - temp;
+      }
+
+      if (SHAPES[shape_idx][tr][tc]) {
+        int board_x = game->current.x + c;
+        int board_y = game->current.y + r;
+        if (board_y >= 0 && board_y < BOARD_HEIGHT && board_x >= 0 &&
+            board_x < BOARD_WIDTH) {
+          game->grid[board_y][board_x] = game->current.type;
+        }
+      }
+    }
+  }
+}
+
+void clear_lines(Game *game) {
+  int lines_cleared = 0;
+  for (int r = BOARD_HEIGHT - 1; r >= 0; r--) {
+    bool full = true;
+    for (int c = 0; c < BOARD_WIDTH; c++) {
+      if (game->grid[r][c] == -1) {
+        full = false;
+        break;
+      }
+    }
+    if (full) {
+      lines_cleared++;
+      for (int move_r = r; move_r > 0; move_r--) {
+        for (int c = 0; c < BOARD_WIDTH; c++) {
+          game->grid[move_r][c] = game->grid[move_r - 1][c];
+        }
+      }
+      for (int c = 0; c < BOARD_WIDTH; c++) {
+        game->grid[0][c] = -1;
+      }
+      r++;
+    }
+  }
+
+  if (lines_cleared > 0) {
+    game->lines += lines_cleared;
+    game->level = 1 + game->lines / 10;
+    int base_scores[5] = {0, 40, 100, 300, 1200};
+    game->score += base_scores[lines_cleared] * game->level;
+  }
+}
+
+void draw_block(SDL_Renderer *renderer, int x, int y, Color color,
+                bool is_ghost) {
+  SDL_Rect rect = {x * BLOCK_SIZE + 1, y * BLOCK_SIZE + 1, BLOCK_SIZE - 2,
+                   BLOCK_SIZE - 2};
+
+  if (is_ghost) {
+    // Subtle, clean semi-transparent ghost block fill & outline
+    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 25);
+    SDL_RenderFillRect(renderer, &rect);
+    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 80);
+    SDL_RenderDrawRect(renderer, &rect);
+    return;
+  }
+
+  // Main block fill
+  SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
+  SDL_RenderFillRect(renderer, &rect);
+
+  // Inner highlight for 3D arcade look
+  SDL_SetRenderDrawColor(
+      renderer, SDL_min(255, color.r + 50), SDL_min(255, color.g + 50),
+      SDL_min(255, color.b + 50), 255);
+  SDL_Rect inner = {rect.x + 4, rect.y + 4, rect.w - 8, rect.h - 8};
+  SDL_RenderDrawRect(renderer, &inner);
+}
+
+void render_game(TTF_Font *font, SDL_Renderer *renderer, Game *game) {
+  // Clear Screen Background
+  SDL_SetRenderDrawColor(renderer, COLOR_BG.r, COLOR_BG.g, COLOR_BG.b, 255);
+  SDL_RenderClear(renderer);
+
+  // Draw Grid Lines
+  SDL_SetRenderDrawColor(renderer, COLOR_GRID.r, COLOR_GRID.g, COLOR_GRID.b,
+                         255);
+  for (int r = 0; r <= BOARD_HEIGHT; r++) {
+    SDL_RenderDrawLine(renderer, 0, r * BLOCK_SIZE, BOARD_WIDTH * BLOCK_SIZE,
+                       r * BLOCK_SIZE);
+  }
+  for (int c = 0; c <= BOARD_WIDTH; c++) {
+    SDL_RenderDrawLine(renderer, c * BLOCK_SIZE, 0, c * BLOCK_SIZE,
+                       BOARD_HEIGHT * BLOCK_SIZE);
+  }
+
+  // Draw Locked Board Blocks
+  for (int r = 0; r < BOARD_HEIGHT; r++) {
+    for (int c = 0; c < BOARD_WIDTH; c++) {
+      if (game->grid[r][c] != -1) {
+        draw_block(renderer, c, r, PIECE_COLORS[game->grid[r][c]], false);
+      }
+    }
+  }
+
+  if (!game->game_over) {
+    // Calculate Ghost Piece position
+    Piece ghost = game->current;
+    while (!check_collision(game, &ghost, 0, 1, ghost.rotation)) {
+      ghost.y++;
+    }
+
+    // Draw Ghost Piece
+    for (int r = 0; r < 4; r++) {
+      for (int c = 0; c < 4; c++) {
+        int tr = r, tc = c;
+        for (int i = 0; i < (ghost.rotation % 4); i++) {
+          int temp = tr;
+          tr = tc;
+          tc = 3 - temp;
+        }
+        if (SHAPES[ghost.type][tr][tc]) {
+          draw_block(renderer, ghost.x + c, ghost.y + r,
+                     PIECE_COLORS[ghost.type], true);
+        }
+      }
+    }
+
+    // Draw Active Piece
+    for (int r = 0; r < 4; r++) {
+      for (int c = 0; c < 4; c++) {
+        int tr = r, tc = c;
+        for (int i = 0; i < (game->current.rotation % 4); i++) {
+          int temp = tr;
+          tr = tc;
+          tc = 3 - temp;
+        }
+        if (SHAPES[game->current.type][tr][tc]) {
+          draw_block(renderer, game->current.x + c, game->current.y + r,
+                     PIECE_COLORS[game->current.type], false);
+        }
+      }
+    }
+  }
+
+  // Draw Side Panel Background
+  SDL_Rect panel_rect = {BOARD_WIDTH * BLOCK_SIZE, 0, PANEL_WIDTH,
+                         WINDOW_HEIGHT};
+  SDL_SetRenderDrawColor(renderer, COLOR_PANEL.r, COLOR_PANEL.g, COLOR_PANEL.b,
+                         255);
+  SDL_RenderFillRect(renderer, &panel_rect);
+
+  // Panel separator line
+  SDL_SetRenderDrawColor(renderer, COLOR_GRID.r, COLOR_GRID.g, COLOR_GRID.b,
+                         255);
+  SDL_RenderDrawLine(renderer, BOARD_WIDTH * BLOCK_SIZE, 0,
+                     BOARD_WIDTH * BLOCK_SIZE, WINDOW_HEIGHT);
+
+  // Side Panel Text Stats (Score, Lines, Level)
+  if (font) {
+    const char *labels[] = {"SCORE", "LINES", "LEVEL"};
+    int values[3] = {game->score, game->lines, game->level};
+
+    int panel_x = BOARD_WIDTH * BLOCK_SIZE + 24;
+    int value_x = BOARD_WIDTH * BLOCK_SIZE + PANEL_WIDTH - 24;
+    int y = 240;
+
+    // Draw "NEXT" section header text
+    SDL_Color fg = {COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b, 255};
+    SDL_Surface *next_surf = TTF_RenderText_Blended(font, "NEXT", fg);
+    if (next_surf) {
+      SDL_Texture *next_tex = SDL_CreateTextureFromSurface(renderer, next_surf);
+      if (next_tex) {
+        SDL_Rect next_rect = {panel_x, 60, next_surf->w, next_surf->h};
+        SDL_RenderCopy(renderer, next_tex, NULL, &next_rect);
+        SDL_DestroyTexture(next_tex);
+      }
+      SDL_FreeSurface(next_surf);
+    }
+
+    // Draw Score, Lines, Level labels & values
+    for (int i = 0; i < 3; i++) {
+      SDL_Surface *ls = TTF_RenderText_Blended(font, labels[i], fg);
+      if (ls) {
+        SDL_Texture *lt = SDL_CreateTextureFromSurface(renderer, ls);
+        if (lt) {
+          SDL_Rect lr = {panel_x, y, ls->w, ls->h};
+          SDL_RenderCopy(renderer, lt, NULL, &lr);
+          SDL_DestroyTexture(lt);
+        }
+        SDL_FreeSurface(ls);
+      }
+
+      char val_str[32];
+      snprintf(val_str, sizeof(val_str), "%d", values[i]);
+      SDL_Surface *vs = TTF_RenderText_Blended(font, val_str, fg);
+      if (vs) {
+        SDL_Texture *vt = SDL_CreateTextureFromSurface(renderer, vs);
+        if (vt) {
+          SDL_Rect vr = {value_x - vs->w, y, vs->w, vs->h};
+          SDL_RenderCopy(renderer, vt, NULL, &vr);
+          SDL_DestroyTexture(vt);
+        }
+        SDL_FreeSurface(vs);
+      }
+      y += 50;
+    }
+  }
+
+  // Render Next Piece Preview Blocks neatly centered
+  int preview_start_x = BOARD_WIDTH * BLOCK_SIZE + 45;
+  int preview_start_y = 105;
+  for (int r = 0; r < 4; r++) {
+    for (int c = 0; c < 4; c++) {
+      if (SHAPES[game->next.type][r][c]) {
+        SDL_Rect p_rect = {preview_start_x + c * 24,
+                           preview_start_y + r * 24, 22, 22};
+        Color col = PIECE_COLORS[game->next.type];
+        SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
+        SDL_RenderFillRect(renderer, &p_rect);
+      }
+    }
+  }
+
+  // Game Over Overlay
+  if (game->game_over) {
+    SDL_Rect overlay = {50, WINDOW_HEIGHT / 2 - 80,
+                        BOARD_WIDTH * BLOCK_SIZE - 100, 160};
+    SDL_SetRenderDrawColor(renderer, 15, 23, 42, 230);
+    SDL_RenderFillRect(renderer, &overlay);
+    SDL_SetRenderDrawColor(renderer, 239, 68, 68, 255);
+    SDL_RenderDrawRect(renderer, &overlay);
+  }
+
+  SDL_RenderPresent(renderer);
+}
